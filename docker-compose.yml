@@ -1,0 +1,62 @@
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       mbus
+      POSTGRES_USER:     mbus
+      POSTGRES_PASSWORD: change_me_please
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mbus -d mbus"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mbus
+
+  # ── M-Bus Poller ───────────────────────────────────────────────────────────
+  poller:
+    build: ./poller
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # EthMBus Converter settings
+      MBUS_IP:        192.168.1.154
+      MBUS_PORT:      9999
+      MBUS_ADDRESSES: 1,2
+      MBUS_POLL:      3
+      MBUS_TIMEOUT:   5
+      # PostgreSQL connection
+      DB_DSN:         postgresql://mbus:change_me_please@db:5432/mbus
+      # Logging
+      LOG_LEVEL:      INFO
+    networks:
+      - mbus
+
+  # ── REST API ───────────────────────────────────────────────────────────────
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_DSN: postgresql://mbus:change_me_please@db:5432/mbus
+    ports:
+      - "8000:8000"
+    networks:
+      - mbus
+
+volumes:
+  db_data:
+
+networks:
+  mbus:
+    driver: bridge
