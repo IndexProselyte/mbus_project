@@ -1,6 +1,6 @@
 # EthMBus SMART – Docker Stack
 
-Kompletný stack pre zber a sprístupnenie dát z EthMBus-XL SMART prevodníka.
+Kompletný stack pre zber a sprístupnenie dát z EthMBus-XL SMART prevodníka v TCP/IP móde (transparentné smerovanie M-Bus pakietov).
 
 ```
 ┌─────────────────────────────────────┐
@@ -18,19 +18,19 @@ Kompletný stack pre zber a sprístupnenie dát z EthMBus-XL SMART prevodníka.
 │  └──────────┘                       │
 └─────────────────────────────────────┘
          ▲
-         │ HTTP /mbus.xml
+         │ TCP/IP REQ_UD2 (M-Bus frames)
 ┌────────┴────────┐
 │  EthMBus-XL     │
-│  SMART          │
+│  (TCPIP mode)   │
 └─────────────────┘
 ```
 
 ## Rýchly štart
 
 ```bash
-# 1. Skopíruj a uprav konfiguráciu
-cp .env.example .env
-nano .env          # nastav MBUS_IP a POSTGRES_PASSWORD
+# 1. Uprav konfiguráciu v docker-compose.yml
+#    (MBUS_IP, MBUS_ADDRESSES, POSTGRES_PASSWORD)
+nano docker-compose.yml
 
 # 2. Spusti celý stack
 docker compose up -d --build
@@ -42,18 +42,34 @@ docker compose logs -f
 API bude dostupné na http://localhost:8000
 Swagger docs: http://localhost:8000/docs
 
-## Konfigurácia (.env)
+## Konfigurácia (docker-compose.yml)
+
+Všetky nastavenia sú priamo v `docker-compose.yml` sekcii `environment:` poddienstva `poller`:
 
 | Premenná            | Popis                                  | Default        |
 |---------------------|----------------------------------------|----------------|
-| `MBUS_IP`           | IP adresa EthMBus prevodníka           | 192.168.1.100  |
-| `MBUS_POLL`         | Interval pollingu v sekundách          | 5              |
-| `MBUS_TIMEOUT`      | HTTP timeout v sekundách               | 4              |
+| `MBUS_IP`           | IP adresa EthMBus prevodníka           | 192.168.1.154  |
+| `MBUS_PORT`         | TCP port prevodníka                    | 9999           |
+| `MBUS_ADDRESSES`    | Čiarkou oddelené M-Bus adresy          | 1,2            |
+| `MBUS_POLL`         | Interval pollingu v sekundách          | 3              |
+| `MBUS_TIMEOUT`      | TCP socket timeout v sekundách        | 5              |
 | `POSTGRES_DB`       | Názov databázy                         | mbus           |
 | `POSTGRES_USER`     | DB používateľ                          | mbus           |
-| `POSTGRES_PASSWORD` | DB heslo                               | *povinné*      |
-| `API_PORT`          | Port API na hostiteľovi                | 8000           |
+| `POSTGRES_PASSWORD` | DB heslo                               | *zmeniť!*      |
 | `LOG_LEVEL`         | Úroveň logovania (DEBUG/INFO/WARNING)  | INFO           |
+
+### Príklad – zmena konfigurácie
+
+```yaml
+environment:
+  MBUS_IP:        192.168.1.154
+  MBUS_PORT:      9999
+  MBUS_ADDRESSES: 1,2,3          # pridať ďalšie adresy
+  MBUS_POLL:      3              # poll každé 3 sekundy
+  MBUS_TIMEOUT:   5
+  DB_DSN:         postgresql://mbus:change_me_please@db:5432/mbus
+  LOG_LEVEL:      INFO
+```
 
 ## API Endpointy
 
@@ -88,3 +104,12 @@ curl "http://localhost:8000/meters/1/values/history?name=Energy&limit=100"
 docker compose down          # zastaví, dáta ostanú
 docker compose down -v       # zastaví + zmaže DB volume
 ```
+
+## Grafana integrácia
+
+API je kompatibilné s Grafana HTTP datasource pluginom. Dáta sa aktualizujú každých 3 sekúnd (podľa `MBUS_POLL`).
+
+**Endpoints pre Grafana:**
+- **Gauge (posledná hodnota):** `/meters/{id}/values/latest`
+- **Time series (história):** `/meters/{id}/values/history?name=Energy&limit=200`
+- **Status (statistiky):** `/converters/{id}/stats`

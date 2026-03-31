@@ -119,38 +119,81 @@ def recv_exactly(sock: socket.socket, n: int) -> bytes:
 def recv_mbus_frame(sock: socket.socket) -> bytes:
     """
     Read one complete M-Bus frame from the socket.
-    Skips any leading garbage bytes; expects a long frame (0x68) or ACK (0xE5).
+    Skips any leading garbage bytes (banners, etc.); expects a long frame (0x68) or ACK (0xE5).
 
     Long frame layout:
         0x68 | L | L | 0x68 | C | A | CI | [data: L-3 bytes] | CS | 0x16
         Total length = L + 6 bytes
     """
-    # Scan for frame start, skipping any garbage
-    b = 0
     while True:
-        first = recv_exactly(sock, 1)
-        b = first[0]
-        if b == 0xE5:
-            return bytes([0xE5])
-        if b == 0x68:
-            break  # Found long frame start
+        # Scan for frame start byte
+        b = 0
+        while True:
+            first = recv_exactly(sock, 1)
+            b = first[0]
+            if b == 0xE5:
+                return bytes([0xE5])
+            if b == 0x68:
+                break  # Potential frame start
+            # Otherwise skip this byte (banner, noise, etc.)
 
-    # Read both length bytes
-    ll = recv_exactly(sock, 2)
-    if ll[0] != ll[1]:
-        raise ValueError(f"Length bytes differ: 0x{ll[0]:02X} vs 0x{ll[1]:02X}")
-    length = ll[0]
+        # Read both length bytes
+        ll = recv_exactly(sock, 2)
+        length_1 = ll[0]
+        length_2 = ll[1]
 
-    # Read: second start (0x68) + L data bytes + CS + stop (0x16) = length + 3 bytes
-    rest = recv_exactly(sock, length + 3)
-    frame = bytes([0x68]) + ll + rest
+        # Valid M-Bus: both length bytes must match and be reasonable (3-250)
+        if length_1 != length_2 or length_1 < 3 or length_1 > 250:
+            log.debug(
+                "Invalid length bytes 0x%02X vs 0x%02X (banner/garbage), continuing scan...",
+                length_1, length_2,
+            )
+            continue  # Try finding next 0x68
 
-    if frame[3] != 0x68:
-        raise ValueError(f"Second start byte is 0x{frame[3]:02X}, expected 0x68")
-    if frame[-1] != 0x16:
-        raise ValueError(f"Stop byte is 0x{frame[-1]:02X}, expected 0x16")
+        length = length_1
 
-    return frame
+        # Read: second start (0x68) + L data bytes + CS + stop (0x16) = length + 3 bytes
+        rest = recv_exactly(sock, length + 3)
+        frame = bytes([0x68]) + ll + rest
+
+        # Validate frame structure
+        if frame[3] != 0x68:
+            log.debug("Invalid second start byte 0x%02X, retrying...", frame[3])
+            continue  # Try finding next 0x68
+
+        if frame[-1] != 0x16:
+            log.debug("Invalid stop byte 0x%02X, retrying...", frame[-1])
+            continue  # Try finding next 0x68
+
+        # Valid frame!
+        return frame
+
+
+def drain_initial_banner(sock: socket.socket) -> None:
+    """
+    The EthMBus-XL sends a greeting banner on connect.
+    Drain it completely so subsequent reads get actual M-Bus frames.
+    Banner ends with NUL bytes or a timeout.
+    """
+    old_timeout = sock.gettimeout()
+    sock.settimeout(0.5)
+    drained = bytearray()
+    try:
+        while True:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                drained.extend(chunk)
+                # Banner typically ends with \r\0 or multiple NUL bytes
+                if drained.endswith(b'\x00') or len(drained) > 500:
+                    break
+            except socket.timeout:
+                break
+    finally:
+        sock.settimeout(old_timeout)
+    if drained:
+        log.debug("Drained banner (%d bytes)", len(drained))
 
 
 def get_converter_info() -> dict:
@@ -337,7 +380,10 @@ def poll_once(conn) -> None:
             sock.settimeout(TCP_TIMEOUT)
             sock.connect((CONVERTER_IP, CONVERTER_PORT))
 
-            # Get converter metadata (no banner in transparent mode)
+            # Drain the converter's initial greeting banner
+            drain_initial_banner(sock)
+
+            # Get converter metadata
             converter_info = get_converter_info()
 
             for seq_id, address in enumerate(ADDRESSES):
